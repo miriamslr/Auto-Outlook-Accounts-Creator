@@ -1,0 +1,15 @@
+# Example proxy format - one proxy per line
+# Remove this file from git before committing real proxies
+
+# HTTP proxies
+# http://ip:port
+# http://username:password@ip:port
+
+# SOCKS5 proxies
+# socks5://ip:port
+# socks5://username:password@ip:port
+
+# Examples (not real):
+# http://192.168.1.1:8080
+# http://user:pass@proxy.example.com:3128
+# socks5://10.0.0.1:1080
