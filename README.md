@@ -2,6 +2,16 @@
 
 Automated Outlook/Hotmail account creator using Selenium and undetected-chromedriver. Bypass bot detection and create multiple accounts efficiently.
 
+## This is Semi Automated, by which I mean is you need to solve captcha manually.
+
+## Easy steps to solve the captcha:
+- The current captcha system for account creation at outlook is, you need to press and hold for a few seconds and then it is solved
+- But, in most of cases its glitchy, so the trick here is hold until it asks you to press and hold
+- As soon as loading icons appear on the button, just move away faster and you will see a loading symbol in the form, if you see it, then you can release it
+- If you dont see it or fail, try another 2-3 times until you are practiced
+- Do it until you get, sometimes it might be IP issue if you aren't able to solve it, so change it before creating more
+- Proxies mode is not tested, so use VPN on and proxies disabled, and everything will be good to go
+
 ## ✨ Features
 
 - ✅ **Automated Account Creation**: Creates Outlook.com accounts with randomly generated names
