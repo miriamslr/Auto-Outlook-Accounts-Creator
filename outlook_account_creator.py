@@ -1983,7 +1983,48 @@ def main():
     print("Creates Outlook/Hotmail email accounts")
     print("="*60 + "\n")
 
-    creator = OutlookAccountCreator(headless=False)  # Non-headless for CAPTCHA solving
+    # Ask user to choose language/locale
+    print("Select language for generated names:")
+    print("1. Portuguese (Brazil) - pt_BR")
+    print("2. English (United States) - en_US")
+    print("3. Spanish (Spain) - es_ES")
+    print("4. French (France) - fr_FR")
+    print("5. German (Germany) - de_DE")
+    print("6. Italian (Italy) - it_IT")
+    print("7. Japanese (Japan) - ja_JP")
+    print("8. Custom locale (enter manually)")
+    
+    locale_map = {
+        '1': 'pt_BR',
+        '2': 'en_US',
+        '3': 'es_ES',
+        '4': 'fr_FR',
+        '5': 'de_DE',
+        '6': 'it_IT',
+        '7': 'ja_JP'
+    }
+    
+    locale_choice = input("\nEnter your choice (1-8, default: 1): ").strip()
+    
+    if not locale_choice:
+        locale_choice = '1'  # Default to Portuguese
+    
+    if locale_choice == '8':
+        custom_locale = input("Enter custom locale (e.g., 'pt_PT', 'es_MX'): ").strip()
+        if custom_locale:
+            selected_locale = custom_locale
+        else:
+            print("Invalid locale, using default: pt_BR")
+            selected_locale = 'pt_BR'
+    elif locale_choice in locale_map:
+        selected_locale = locale_map[locale_choice]
+    else:
+        print(f"Invalid choice '{locale_choice}', using default: pt_BR")
+        selected_locale = 'pt_BR'
+    
+    print(f"\n✓ Selected locale: {selected_locale}\n")
+
+    creator = OutlookAccountCreator(headless=False, locale=selected_locale)  # Non-headless for CAPTCHA solving
 
     # Ask user how many accounts to create
     try:
