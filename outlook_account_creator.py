@@ -25,17 +25,22 @@ class OutlookAccountCreator:
 
     SIGNUP_URL = "https://signup.live.com"
 
-    def __init__(self, proxy: Optional[str] = None, headless: bool = True):
+    def __init__(self, proxy: Optional[str] = None, headless: bool = True, locale: Optional[str] = None):
         """
         Initialize Outlook account creator
 
         Args:
             proxy: Proxy to use for browser (format: ip:port)
             headless: Run browser in headless mode
+            locale: Faker locale (e.g., 'en_US', 'pt_BR', 'es_ES'). 
+                    If None, uses FAKER_LOCALE from config.py
         """
-        self.faker = Faker()
+        # Use locale from parameter, config, or default to 'pt_BR'
+        faker_locale = locale or getattr(config, 'FAKER_LOCALE', 'pt_BR')
+        self.faker = Faker(faker_locale)
         self.proxy = proxy
         self.headless = headless
+        logging.info(f"Faker initialized with locale: {faker_locale}")
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
@@ -145,11 +150,22 @@ class OutlookAccountCreator:
 
         driver = None
         try:
-            # Generate account details
-            username = self.generate_username()
-            password = self.generate_password()
+            # Generate account details - generate name first, then use it for email
             first_name = self.faker.first_name()
             last_name = self.faker.last_name()
+            
+            # Generate second last name (4 letters) for email uniqueness
+            second_last_name = self.faker.last_name().lower()
+            # Take first 4 letters, or pad if shorter
+            second_last_4 = (second_last_name[:4] if len(second_last_name) >= 4 
+                            else second_last_name + 'x' * (4 - len(second_last_name)))[:4]
+            
+            # Generate username from the same name (lowercase, no spaces, with second last name)
+            first_lower = first_name.lower()
+            last_lower = last_name.lower()
+            username = f"{first_lower}{last_lower}{second_last_4}"
+            
+            password = self.generate_password()
 
             # Random birth date (age 18-50)
             birth_year = random.randint(1974, 2006)
@@ -211,8 +227,13 @@ class OutlookAccountCreator:
                 
                 for attempt in range(max_email_attempts):
                     if attempt > 0:
-                        # Generate new email for retry
-                        username = self.generate_username()
+                        # Generate new email for retry - keep same name, just change second last name
+                        second_last_name = self.faker.last_name().lower()
+                        second_last_4 = (second_last_name[:4] if len(second_last_name) >= 4 
+                                        else second_last_name + 'x' * (4 - len(second_last_name)))[:4]
+                        first_lower = first_name.lower()
+                        last_lower = last_name.lower()
+                        username = f"{first_lower}{last_lower}{second_last_4}"
                         email = f"{username}@outlook.com"
                         logging.info(f"Attempt {attempt + 1}: Trying new email: {email}")
                     
@@ -249,32 +270,13 @@ class OutlookAccountCreator:
 
                 time.sleep(0.2)  # Reduced from 0.5s
 
-                # Click Next button - try multiple selectors
-                next_button = None
-                next_selectors = [
-                    (By.ID, "iSignupAction"),
-                    (By.CSS_SELECTOR, "input[type='submit']"),
-                    (By.CSS_SELECTOR, "button[type='submit']"),
-                    (By.XPATH, "//input[@type='submit']"),
-                    (By.XPATH, "//button[contains(text(), 'Next')]"),
-                    (By.CSS_SELECTOR, "input[value='Next']")
-                ]
-
-                for selector_type, selector_value in next_selectors:
-                    try:
-                        logging.info(f"Trying Next button selector: {selector_type} = {selector_value}")
-                        next_button = driver.find_element(selector_type, selector_value)
-                        next_button.click()
-                        logging.info(f"✓ Clicked Next button with: {selector_type} = {selector_value}")
-                        time.sleep(0.5)  # Reduced from 1.5s - Wait for page to load
-                        break
-                    except:
-                        continue
-
-                if not next_button:
+                # Click Next button using helper method (supports Portuguese and English)
+                if not self._click_next_button(driver, wait_time=5, context="after email"):
                     logging.error("Could not find Next button with any selector")
                     self._take_screenshot(driver, "error_next_button")
                     return None
+                
+                time.sleep(1)  # Wait for page to load
                 
                 # After clicking Next, check again for email error
                 time.sleep(1)
@@ -329,31 +331,15 @@ class OutlookAccountCreator:
                 password_input.clear()
                 password_input.send_keys(password)
                 logging.info(f"✓ Entered password")
-                time.sleep(0.3)  # Reduced from 1s
+                time.sleep(0.5)  # Wait for password validation
 
-                # Click Next button - try multiple selectors
-                next_button = None
-                next_selectors = [
-                    (By.ID, "iSignupAction"),
-                    (By.CSS_SELECTOR, "input[type='submit']"),
-                    (By.CSS_SELECTOR, "button[type='submit']"),
-                    (By.XPATH, "//input[@type='submit']"),
-                    (By.XPATH, "//button[contains(text(), 'Next')]")
-                ]
-
-                for selector_type, selector_value in next_selectors:
-                    try:
-                        next_button = driver.find_element(selector_type, selector_value)
-                        next_button.click()
-                        logging.info(f"✓ Clicked Next button")
-                        time.sleep(0.5)  # Reduced from 1s - Wait for next page to load
-                        break
-                    except:
-                        continue
-
-                if not next_button:
+                # Click Next button using helper method (supports Portuguese and English)
+                if not self._click_next_button(driver, wait_time=5, context="after password"):
                     logging.error("Could not find Next button after password")
                     self._take_screenshot(driver, "error_next_button_step2")
+                    return None
+                
+                time.sleep(1)  # Wait for next page to load
 
             except Exception as e:
                 logging.error(f"Failed at step 2 (password): {e}")
@@ -397,174 +383,286 @@ class OutlookAccountCreator:
                 if not country_found:
                     logging.info("No country field found (may not be required)")
 
-                # Enter birth date - WAIT for fields to be present
+                # Enter birth date - Using improved selectors based on TypeScript reference
                 dob_entered = False
 
-                # Wait for DOB fields to load - Microsoft uses custom dropdowns, not <select>
+                # Wait for DOB fields to load
                 try:
                     logging.info("Waiting for DOB fields to load...")
-                    time.sleep(0.5)  # Reduced from 1.5s - Give page time to fully render custom components
+                    time.sleep(1.5)  # Give page time to fully render
 
-                    # Strategy 1: Find Month dropdown button (custom dropdown widget)
-                    month_button = None
-                    month_selectors = [
-                        (By.CSS_SELECTOR, "button[aria-label*='Month' i]"),
-                        (By.CSS_SELECTOR, "button[placeholder*='Month' i]"),
-                        (By.CSS_SELECTOR, "div[role='combobox'][aria-label*='Month' i]"),
-                        (By.XPATH, "//button[contains(text(), 'Month')]"),
-                        (By.XPATH, "//button[contains(@aria-label, 'month') or contains(@aria-label, 'Month')]"),
-                        (By.XPATH, "//input[@name='BirthMonth']"),
-                        (By.XPATH, "//select[@name='BirthMonth']"),
-                        # Fallback: find first button/div in birthdate section
-                        (By.XPATH, "//button[1]"),
-                    ]
-
-                    for selector_type, selector_value in month_selectors:
-                        try:
-                            month_button = wait_short.until(
-                                EC.element_to_be_clickable((selector_type, selector_value))
-                            )
-                            logging.info(f"✓ Found month field with: {selector_type}")
-                            break
-                        except:
-                            continue
-
-                    if month_button:
-                        # Convert month number to name
-                        month_names = ["January", "February", "March", "April", "May", "June",
-                                      "July", "August", "September", "October", "November", "December"]
-                        month_name = month_names[birth_month - 1]
-
-                        # Scroll into view and click using JavaScript (avoids click interception)
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", month_button)
-                        time.sleep(0.2)
-                        driver.execute_script("arguments[0].click();", month_button)
-                        time.sleep(0.5)
-
-                        # Find and click the month option by text
-                        try:
-                            month_option_selectors = [
-                                (By.XPATH, f"//div[contains(@class, 'fui-Option') and contains(text(), '{month_name}')]"),
-                                (By.XPATH, f"//button[contains(text(), '{month_name}')]"),
-                                (By.XPATH, f"//li[contains(text(), '{month_name}')]"),
-                                (By.XPATH, f"//*[contains(@role, 'option') and contains(text(), '{month_name}')]"),
-                                (By.XPATH, f"//*[text()='{month_name}']"),
-                            ]
-
-                            month_option = None
-                            for sel_type, sel_value in month_option_selectors:
-                                try:
-                                    month_option = WebDriverWait(driver, 3).until(
-                                        EC.element_to_be_clickable((sel_type, sel_value))
-                                    )
-                                    month_option.click()
-                                    logging.info(f"✓ Selected month: {month_name}")
-                                    break
-                                except:
-                                    continue
-
-                            if not month_option:
-                                raise Exception(f"Could not find month option {month_name}")
-
-                        except Exception as e:
-                            logging.error(f"Error selecting month option: {e}")
-                            raise
-
-                        time.sleep(0.3)
-                    else:
-                        raise Exception("Could not find Month field")
-
-                    # Strategy 2: Find Day dropdown button
-                    day_button = None
+                    # DAY - Improved selectors (Portuguese and English, with IDs)
                     day_selectors = [
+                        (By.ID, "BirthDayDropdown"),
+                        (By.CSS_SELECTOR, "select[id='BirthDayDropdown']"),
+                        (By.CSS_SELECTOR, "combobox[id='BirthDayDropdown']"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Dia' i]"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Day' i]"),
+                        (By.NAME, "BirthDay"),
+                        (By.CSS_SELECTOR, "select[name='BirthDay']"),
+                        (By.CSS_SELECTOR, "select[id='BirthDay']"),
+                        (By.CSS_SELECTOR, "input[type='number'][aria-label*='Dia' i]"),
+                        (By.CSS_SELECTOR, "button[aria-label*='Dia' i]"),
+                        (By.CSS_SELECTOR, "div[aria-label*='Dia' i]"),
                         (By.CSS_SELECTOR, "button[aria-label*='Day' i]"),
-                        (By.CSS_SELECTOR, "button[placeholder*='Day' i]"),
-                        (By.CSS_SELECTOR, "div[role='combobox'][aria-label*='Day' i]"),
-                        (By.XPATH, "//button[contains(text(), 'Day')]"),
-                        (By.XPATH, "//button[contains(@aria-label, 'day') or contains(@aria-label, 'Day')]"),
-                        (By.XPATH, "//input[@name='BirthDay']"),
-                        (By.XPATH, "//select[@name='BirthDay']"),
-                        (By.XPATH, "//button[2]"),  # Second button
                     ]
 
+                    day_element = None
+                    found_day_selector = None
                     for selector_type, selector_value in day_selectors:
                         try:
-                            logging.info(f"Trying day selector: {selector_type}")
-                            day_button = driver.find_element(selector_type, selector_value)
-                            logging.info(f"✓ Found day field with: {selector_type}")
+                            day_element = wait_short.until(
+                                EC.presence_of_element_located((selector_type, selector_value))
+                            )
+                            found_day_selector = (selector_type, selector_value)
+                            logging.info(f"✓ Found day field with: {selector_type} = {selector_value}")
                             break
                         except:
                             continue
 
-                    if day_button:
-                        # Scroll into view and click using JavaScript (avoids click interception)
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", day_button)
-                        time.sleep(0.2)
-                        driver.execute_script("arguments[0].click();", day_button)
-                        time.sleep(0.5)
-
-                        # Find and click the day option by text
-                        try:
-                            day_option_selectors = [
-                                (By.XPATH, f"//div[contains(@class, 'fui-Option') and text()='{birth_day}']"),
-                                (By.XPATH, f"//button[text()='{birth_day}']"),
-                                (By.XPATH, f"//li[text()='{birth_day}']"),
-                                (By.XPATH, f"//*[contains(@role, 'option') and text()='{birth_day}']"),
-                                (By.XPATH, f"//*[text()='{birth_day}']"),
-                            ]
-
-                            day_option = None
-                            for sel_type, sel_value in day_option_selectors:
-                                try:
-                                    day_option = WebDriverWait(driver, 3).until(
-                                        EC.element_to_be_clickable((sel_type, sel_value))
-                                    )
-                                    day_option.click()
-                                    logging.info(f"✓ Selected day: {birth_day}")
-                                    break
-                                except:
-                                    continue
-
-                            if not day_option:
-                                raise Exception(f"Could not find day option {birth_day}")
-
-                        except Exception as e:
-                            logging.error(f"Error selecting day option: {e}")
-                            raise
-
-                        time.sleep(0.3)
-                    else:
+                    if not day_element:
+                        logging.error("Could not find day field with any selector")
+                        self._take_screenshot(driver, "error_day_field_not_found")
                         raise Exception("Could not find Day field")
 
-                    # Strategy 3: Find Year input field (this one IS a standard input)
-                    year_input = None
-                    year_selectors = [
-                        (By.NAME, "BirthYear"),
-                        (By.CSS_SELECTOR, "input[aria-label*='Year' i]"),
-                        (By.CSS_SELECTOR, "input[name='BirthYear']"),
-                        (By.CSS_SELECTOR, "input[type='number']"),
-                        (By.CSS_SELECTOR, "input[placeholder*='Year' i]"),
-                        (By.XPATH, "//input[contains(@aria-label, 'year') or contains(@aria-label, 'Year')]"),
+                    # Check if it's a select or combobox
+                    tag_name = day_element.tag_name.lower()
+                    day_selected = False
+
+                    if tag_name == 'select':
+                        # HTML select - use Select class
+                        logging.info("Day field is HTML select, using Select class")
+                        try:
+                            select = Select(day_element)
+                            select.select_by_value(str(birth_day))
+                            day_selected = True
+                            logging.info(f"✓ Selected day {birth_day} via Select")
+                        except:
+                            try:
+                                select.select_by_visible_text(str(birth_day))
+                                day_selected = True
+                                logging.info(f"✓ Selected day {birth_day} via visible text")
+                            except Exception as e:
+                                logging.error(f"Error selecting day via Select: {e}")
+                    else:
+                        # Custom combobox - click and select option
+                        logging.info("Day field is custom combobox, clicking and selecting option")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", day_element)
+                        time.sleep(0.2)
+                        driver.execute_script("arguments[0].click();", day_element)
+                        time.sleep(0.5)
+
+                        # Try to find and click the day option
+                        day_value = str(birth_day)
+                        day_option_selectors = [
+                            (By.XPATH, f"//*[@role='option'][@aria-label='{day_value}']"),
+                            (By.XPATH, f"//*[@role='option'][text()='{day_value}']"),
+                            (By.XPATH, f"//option[@value='{day_value}']"),
+                            (By.XPATH, f"//li[text()='{day_value}']"),
+                            (By.XPATH, f"//div[text()='{day_value}']"),
+                            (By.XPATH, f"//*[text()='{day_value}']"),
+                        ]
+
+                        for opt_type, opt_value in day_option_selectors:
+                            try:
+                                day_option = WebDriverWait(driver, 3).until(
+                                    EC.element_to_be_clickable((opt_type, opt_value))
+                                )
+                                day_option.click()
+                                day_selected = True
+                                logging.info(f"✓ Selected day {day_value}")
+                                break
+                            except:
+                                continue
+
+                        # Fallback: JavaScript search
+                        if not day_selected:
+                            logging.warn("Trying JavaScript fallback for day selection")
+                            clicked = driver.execute_script("""
+                                const options = Array.from(document.querySelectorAll('[role="option"], option, li, div'));
+                                const dayOption = options.find(opt => {
+                                    const text = opt.textContent?.trim();
+                                    const ariaLabel = opt.getAttribute('aria-label');
+                                    return text === arguments[0] || ariaLabel === arguments[0];
+                                });
+                                if (dayOption) {
+                                    dayOption.click();
+                                    return true;
+                                }
+                                return false;
+                            """, day_value)
+                            if clicked:
+                                day_selected = True
+                                logging.info(f"✓ Selected day {day_value} via JavaScript")
+
+                    if not day_selected:
+                        raise Exception(f"Could not select day {birth_day}")
+
+                    time.sleep(0.3)
+
+                    # MONTH - Improved selectors with Portuguese month names
+                    month_selectors = [
+                        (By.ID, "BirthMonthDropdown"),
+                        (By.CSS_SELECTOR, "select[id='BirthMonthDropdown']"),
+                        (By.CSS_SELECTOR, "combobox[id='BirthMonthDropdown']"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Mês' i]"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Month' i]"),
+                        (By.NAME, "BirthMonth"),
+                        (By.CSS_SELECTOR, "select[name='BirthMonth']"),
+                        (By.CSS_SELECTOR, "select[id='BirthMonth']"),
+                        (By.CSS_SELECTOR, "button[aria-label*='Mês' i]"),
+                        (By.CSS_SELECTOR, "div[aria-label*='Mês' i]"),
+                        (By.CSS_SELECTOR, "button[aria-label*='Month' i]"),
                     ]
 
-                    for selector_type, selector_value in year_selectors:
+                    month_names_pt = ['', 'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+                                      'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro']
+                    month_names_en = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                                     'July', 'August', 'September', 'October', 'November', 'December']
+                    
+                    month_name_pt = month_names_pt[birth_month]
+                    month_name_en = month_names_en[birth_month]
+                    month_num = str(birth_month)
+
+                    month_element = None
+                    for selector_type, selector_value in month_selectors:
                         try:
-                            logging.info(f"Trying year selector: {selector_type}")
-                            year_input = driver.find_element(selector_type, selector_value)
-                            logging.info(f"✓ Found year input with: {selector_type}")
+                            month_element = wait_short.until(
+                                EC.presence_of_element_located((selector_type, selector_value))
+                            )
+                            logging.info(f"✓ Found month field with: {selector_type} = {selector_value}")
                             break
                         except:
                             continue
 
-                    if year_input:
-                        year_input.clear()
-                        year_input.send_keys(str(birth_year))
-                        logging.info(f"✓ Entered year: {birth_year}")
+                    if not month_element:
+                        raise Exception("Could not find Month field")
+
+                    tag_name = month_element.tag_name.lower()
+                    month_selected = False
+
+                    if tag_name == 'select':
+                        # HTML select
+                        logging.info("Month field is HTML select")
+                        try:
+                            select = Select(month_element)
+                            select.select_by_value(month_num)
+                            month_selected = True
+                            logging.info(f"✓ Selected month {month_num} via Select")
+                        except:
+                            try:
+                                select.select_by_visible_text(month_name_pt)
+                                month_selected = True
+                                logging.info(f"✓ Selected month {month_name_pt} via Select")
+                            except:
+                                try:
+                                    select.select_by_visible_text(month_name_en)
+                                    month_selected = True
+                                    logging.info(f"✓ Selected month {month_name_en} via Select")
+                                except Exception as e:
+                                    logging.error(f"Error selecting month via Select: {e}")
                     else:
-                        raise Exception("Could not find Year input field")
+                        # Custom combobox
+                        logging.info("Month field is custom combobox")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", month_element)
+                        time.sleep(0.2)
+                        driver.execute_script("arguments[0].click();", month_element)
+                        time.sleep(0.5)
+
+                        # Try Portuguese first, then English, then number
+                        month_option_selectors = [
+                            (By.XPATH, f"//*[@role='option'][contains(text(), '{month_name_pt}')]"),
+                            (By.XPATH, f"//*[@role='option'][contains(text(), '{month_name_en}')]"),
+                            (By.XPATH, f"//*[@role='option'][text()='{month_num}']"),
+                            (By.XPATH, f"//*[contains(text(), '{month_name_pt}')]"),
+                            (By.XPATH, f"//*[contains(text(), '{month_name_en}')]"),
+                            (By.XPATH, f"//li[contains(text(), '{month_name_pt}')]"),
+                            (By.XPATH, f"//div[contains(text(), '{month_name_pt}')]"),
+                        ]
+
+                        for opt_type, opt_value in month_option_selectors:
+                            try:
+                                month_option = WebDriverWait(driver, 3).until(
+                                    EC.element_to_be_clickable((opt_type, opt_value))
+                                )
+                                month_option.click()
+                                month_selected = True
+                                logging.info(f"✓ Selected month {month_name_pt}")
+                                break
+                            except:
+                                continue
+
+                        # JavaScript fallback
+                        if not month_selected:
+                            clicked = driver.execute_script("""
+                                const options = Array.from(document.querySelectorAll('[role="option"], option, li, div'));
+                                const monthOption = options.find(opt => {
+                                    const text = opt.textContent?.toLowerCase().trim();
+                                    return text.includes(arguments[0].toLowerCase()) || text === arguments[1];
+                                });
+                                if (monthOption) {
+                                    monthOption.click();
+                                    return true;
+                                }
+                                return false;
+                            """, month_name_pt, month_num)
+                            if clicked:
+                                month_selected = True
+                                logging.info(f"✓ Selected month via JavaScript")
+
+                    if not month_selected:
+                        raise Exception(f"Could not select month {birth_month}")
+
+                    time.sleep(0.3)
+
+                    # YEAR - Improved selectors
+                    year_selectors = [
+                        (By.NAME, "BirthYear"),
+                        (By.ID, "BirthYear"),
+                        (By.CSS_SELECTOR, "input[type='number'][aria-label*='Ano' i]"),
+                        (By.CSS_SELECTOR, "input[type='number'][aria-label*='Year' i]"),
+                        (By.CSS_SELECTOR, "select[name='BirthYear']"),
+                        (By.CSS_SELECTOR, "select[id='BirthYear']"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Ano' i]"),
+                        (By.CSS_SELECTOR, "input[aria-label*='Ano' i]"),
+                        (By.CSS_SELECTOR, "input[aria-label*='Year' i]"),
+                    ]
+
+                    year_element = None
+                    for selector_type, selector_value in year_selectors:
+                        try:
+                            year_element = wait_short.until(
+                                EC.presence_of_element_located((selector_type, selector_value))
+                            )
+                            logging.info(f"✓ Found year field with: {selector_type} = {selector_value}")
+                            break
+                        except:
+                            continue
+
+                    if not year_element:
+                        raise Exception("Could not find Year field")
+
+                    tag_name = year_element.tag_name.lower()
+                    year_filled = False
+
+                    if tag_name == 'select':
+                        # HTML select
+                        select = Select(year_element)
+                        select.select_by_value(str(birth_year))
+                        year_filled = True
+                        logging.info(f"✓ Selected year {birth_year} via Select")
+                    else:
+                        # Input field
+                        year_element.clear()
+                        year_element.send_keys(str(birth_year))
+                        year_filled = True
+                        logging.info(f"✓ Entered year {birth_year}")
+
+                    if not year_filled:
+                        raise Exception(f"Could not fill year {birth_year}")
 
                     dob_entered = True
-                    logging.info(f"✓ Successfully entered complete DOB: {birth_month}/{birth_day}/{birth_year}")
+                    logging.info(f"✓ Successfully entered complete DOB: {birth_day}/{birth_month}/{birth_year}")
 
                 except TimeoutException:
                     logging.error("Timeout waiting for DOB fields")
@@ -607,36 +705,11 @@ class OutlookAccountCreator:
 
                 time.sleep(0.5)  # Reduced from 1s - Give page time to be ready for Next button
 
-                # Try to click Next button after DOB - more robust approach
-                next_button_found = False
-                next_selectors = [
-                    (By.ID, "iSignupAction"),
-                    (By.CSS_SELECTOR, "input[type='submit']"),
-                    (By.CSS_SELECTOR, "button[type='submit']"),
-                    (By.XPATH, "//input[@type='submit']"),
-                    (By.XPATH, "//button[@type='submit']"),
-                    (By.XPATH, "//input[@id='iSignupAction']"),
-                ]
-
-                for selector_type, selector_value in next_selectors:
-                    try:
-                        next_button = WebDriverWait(driver, 3).until(
-                            EC.element_to_be_clickable((selector_type, selector_value))
-                        )
-                        # Use JavaScript click for better reliability
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
-                        time.sleep(0.3)
-                        driver.execute_script("arguments[0].click();", next_button)
-                        logging.info(f"✓ Clicked Next after country/DOB using: {selector_type}")
-                        next_button_found = True
-                        time.sleep(1)  # Reduced from 2s - Wait for page to navigate
-                        break
-                    except Exception as e:
-                        logging.debug(f"Failed with selector {selector_type}: {e}")
-                        continue
-
-                if not next_button_found:
+                # Click Next button after DOB using helper method (supports Portuguese and English)
+                if not self._click_next_button(driver, wait_time=5, context="after country/DOB"):
                     logging.warning("Could not auto-click Next button - may already be on next page or needs manual click")
+                
+                time.sleep(1)  # Wait for page to navigate
 
             except Exception as e:
                 logging.error(f"Failed at step 3 (country/DOB): {e}")
@@ -733,32 +806,11 @@ class OutlookAccountCreator:
 
                     time.sleep(0.5)
 
-                    # Try to click Next button
-                    next_selectors = [
-                        (By.CSS_SELECTOR, "button[type='submit']"),
-                        (By.XPATH, "//button[contains(text(), 'Next')]"),
-                        (By.ID, "iSignupAction"),
-                        (By.CSS_SELECTOR, "input[type='submit']"),
-                        (By.XPATH, "//input[@type='submit']"),
-                        (By.XPATH, "//button[contains(@class, 'fui-Button')]"),
-                    ]
-
-                    next_clicked = False
-                    for selector_type, selector_value in next_selectors:
-                        try:
-                            next_button = wait_short.until(
-                                EC.element_to_be_clickable((selector_type, selector_value))
-                            )
-                            next_button.click()
-                            logging.info(f"✓ Clicked Next after name")
-                            next_clicked = True
-                            time.sleep(1)
-                            break
-                        except:
-                            continue
-
-                    if not next_clicked:
+                    # Click Next button after name using helper method (supports Portuguese and English)
+                    if not self._click_next_button(driver, wait_time=5, context="after name"):
                         logging.warning("Could not click Next button after name")
+                    
+                    time.sleep(1)
 
             except Exception as e:
                 logging.warning(f"Issue at step 4 (name): {e}")
@@ -818,32 +870,11 @@ class OutlookAccountCreator:
                             logging.info("✓ CAPTCHA appears to be solved! Continuing...")
                             time.sleep(2)  # Give page time to fully load
 
-                            # Now click the Next button after CAPTCHA
+                            # Now click the Next button after CAPTCHA using helper method
                             logging.info("Looking for Next button after CAPTCHA...")
-                            next_clicked = False
-
-                            # Try multiple selectors for the Next button
-                            next_selectors = [
-                                (By.CSS_SELECTOR, "button[type='submit']"),
-                                (By.CSS_SELECTOR, "input[type='submit']"),
-                                (By.ID, "iSignupAction"),
-                                (By.XPATH, "//button[contains(text(), 'Next')]"),
-                                (By.XPATH, "//input[@value='Next']"),
-                            ]
-
-                            for selector_type, selector_value in next_selectors:
-                                try:
-                                    next_button = driver.find_element(selector_type, selector_value)
-                                    if next_button.is_displayed():
-                                        next_button.click()
-                                        logging.info(f"✓ Clicked Next button after CAPTCHA")
-                                        next_clicked = True
-                                        time.sleep(3)  # Wait for navigation
-                                        break
-                                except:
-                                    continue
-
-                            if not next_clicked:
+                            if self._click_next_button(driver, wait_time=5, context="after CAPTCHA"):
+                                time.sleep(3)  # Wait for navigation
+                            else:
                                 logging.warning("Could not find Next button after CAPTCHA - may auto-proceed")
                                 time.sleep(3)
 
@@ -944,11 +975,22 @@ class OutlookAccountCreator:
         driver = None
 
         try:
-            # Generate account details (EXACT same as create_account method)
-            username = self.generate_username()
-            password = self.generate_password()
+            # Generate account details - generate name first, then use it for email (EXACT same as create_account method)
             first_name = self.faker.first_name()
             last_name = self.faker.last_name()
+            
+            # Generate second last name (4 letters) for email uniqueness
+            second_last_name = self.faker.last_name().lower()
+            # Take first 4 letters, or pad if shorter
+            second_last_4 = (second_last_name[:4] if len(second_last_name) >= 4 
+                            else second_last_name + 'x' * (4 - len(second_last_name)))[:4]
+            
+            # Generate username from the same name (lowercase, no spaces, with second last name)
+            first_lower = first_name.lower()
+            last_lower = last_name.lower()
+            username = f"{first_lower}{last_lower}{second_last_4}"
+            
+            password = self.generate_password()
 
             # Random birth date (age 18-50)
             birth_year = random.randint(1974, 2006)
@@ -1009,8 +1051,13 @@ class OutlookAccountCreator:
                 
                 for attempt in range(max_email_attempts):
                     if attempt > 0:
-                        # Generate new email for retry
-                        username = self.generate_username()
+                        # Generate new email for retry - keep same name, just change second last name
+                        second_last_name = self.faker.last_name().lower()
+                        second_last_4 = (second_last_name[:4] if len(second_last_name) >= 4 
+                                        else second_last_name + 'x' * (4 - len(second_last_name)))[:4]
+                        first_lower = first_name.lower()
+                        last_lower = last_name.lower()
+                        username = f"{first_lower}{last_lower}{second_last_4}"
                         email = f"{username}@outlook.com"
                         logging.info(f"Attempt {attempt + 1}: Trying new email: {email}")
                     
@@ -1056,29 +1103,13 @@ class OutlookAccountCreator:
 
                 time.sleep(0.5)
 
-                # Click Next button
-                next_button = None
-                next_selectors = [
-                    (By.ID, "iSignupAction"),
-                    (By.CSS_SELECTOR, "input[type='submit']"),
-                    (By.CSS_SELECTOR, "button[type='submit']"),
-                    (By.XPATH, "//input[@type='submit']")
-                ]
-
-                for selector_type, selector_value in next_selectors:
-                    try:
-                        next_button = driver.find_element(selector_type, selector_value)
-                        next_button.click()
-                        logging.info(f"✓ Clicked Next button")
-                        time.sleep(1.5)  # Wait for page to load
-                        break
-                    except:
-                        continue
-
-                if not next_button:
+                # Click Next button using helper method (supports Portuguese and English)
+                if not self._click_next_button(driver, wait_time=5, context="after email"):
                     logging.error("Could not find Next button")
                     self._take_screenshot(driver, "keepopen_error_next_button")
                     return {'driver': driver, 'error': 'No Next button found'}
+                
+                time.sleep(1.5)  # Wait for page to load
                 
                 # After clicking Next, check again for email error (in case it appears after click)
                 time.sleep(1)
@@ -1132,26 +1163,15 @@ class OutlookAccountCreator:
                 password_input.clear()
                 password_input.send_keys(password)
                 logging.info(f"✓ Entered password")
-                time.sleep(1)
+                time.sleep(0.5)  # Wait for password validation
 
-                # Click Next
-                next_button = None
-                next_selectors = [
-                    (By.ID, "iSignupAction"),
-                    (By.CSS_SELECTOR, "input[type='submit']"),
-                    (By.CSS_SELECTOR, "button[type='submit']"),
-                    (By.XPATH, "//input[@type='submit']")
-                ]
-
-                for selector_type, selector_value in next_selectors:
-                    try:
-                        next_button = driver.find_element(selector_type, selector_value)
-                        next_button.click()
-                        logging.info(f"✓ Clicked Next button")
-                        time.sleep(1)
-                        break
-                    except:
-                        continue
+                # Click Next button using helper method (supports Portuguese and English)
+                if not self._click_next_button(driver, wait_time=5, context="after password"):
+                    logging.error("Could not find Next button after password")
+                    self._take_screenshot(driver, "keepopen_error_next_button_step2")
+                    return {'driver': driver, 'error': 'No Next button found after password'}
+                
+                time.sleep(1)  # Wait for next page to load
 
             except Exception as e:
                 logging.error(f"Failed at step 2 (password): {e}")
@@ -1185,137 +1205,265 @@ class OutlookAccountCreator:
                 if not country_found:
                     logging.info("No country field found (may not be required)")
 
-                # Enter birth date using MODERN DROPDOWN APPROACH (same as create_account)
+                # Enter birth date - Using improved selectors based on TypeScript reference (same as create_account)
                 dob_entered = False
 
                 try:
                     logging.info("Waiting for DOB fields to load...")
                     time.sleep(1.5)
 
-                    # Month dropdown (custom widget)
-                    month_button = None
-                    month_selectors = [
-                        (By.CSS_SELECTOR, "button[aria-label*='Month' i]"),
-                        (By.CSS_SELECTOR, "button[placeholder*='Month' i]"),
-                        (By.CSS_SELECTOR, "div[role='combobox'][aria-label*='Month' i]"),
-                        (By.XPATH, "//button[contains(text(), 'Month')]"),
-                        (By.XPATH, "//button[contains(@aria-label, 'month') or contains(@aria-label, 'Month')]"),
-                    ]
-
-                    for selector_type, selector_value in month_selectors:
-                        try:
-                            month_button = wait_short.until(
-                                EC.element_to_be_clickable((selector_type, selector_value))
-                            )
-                            logging.info(f"✓ Found month field")
-                            break
-                        except:
-                            continue
-
-                    if month_button:
-                        month_names = ["January", "February", "March", "April", "May", "June",
-                                      "July", "August", "September", "October", "November", "December"]
-                        month_name = month_names[birth_month - 1]
-
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", month_button)
-                        time.sleep(0.2)
-                        driver.execute_script("arguments[0].click();", month_button)
-                        time.sleep(0.5)
-
-                        # Select month option
-                        month_option_selectors = [
-                            (By.XPATH, f"//div[contains(@class, 'fui-Option') and contains(text(), '{month_name}')]"),
-                            (By.XPATH, f"//button[contains(text(), '{month_name}')]"),
-                            (By.XPATH, f"//li[contains(text(), '{month_name}')]"),
-                            (By.XPATH, f"//*[contains(@role, 'option') and contains(text(), '{month_name}')]"),
-                        ]
-
-                        for sel_type, sel_value in month_option_selectors:
-                            try:
-                                month_option = WebDriverWait(driver, 3).until(
-                                    EC.element_to_be_clickable((sel_type, sel_value))
-                                )
-                                month_option.click()
-                                logging.info(f"✓ Selected month: {month_name}")
-                                break
-                            except:
-                                continue
-
-                        time.sleep(0.3)
-                    else:
-                        raise Exception("Could not find Month field")
-
-                    # Day dropdown
-                    day_button = None
+                    # DAY - Improved selectors (Portuguese and English, with IDs)
                     day_selectors = [
+                        (By.ID, "BirthDayDropdown"),
+                        (By.CSS_SELECTOR, "select[id='BirthDayDropdown']"),
+                        (By.CSS_SELECTOR, "combobox[id='BirthDayDropdown']"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Dia' i]"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Day' i]"),
+                        (By.NAME, "BirthDay"),
+                        (By.CSS_SELECTOR, "select[name='BirthDay']"),
+                        (By.CSS_SELECTOR, "select[id='BirthDay']"),
+                        (By.CSS_SELECTOR, "input[type='number'][aria-label*='Dia' i]"),
+                        (By.CSS_SELECTOR, "button[aria-label*='Dia' i]"),
+                        (By.CSS_SELECTOR, "div[aria-label*='Dia' i]"),
                         (By.CSS_SELECTOR, "button[aria-label*='Day' i]"),
-                        (By.CSS_SELECTOR, "button[placeholder*='Day' i]"),
-                        (By.CSS_SELECTOR, "div[role='combobox'][aria-label*='Day' i]"),
-                        (By.XPATH, "//button[contains(text(), 'Day')]"),
                     ]
 
+                    day_element = None
                     for selector_type, selector_value in day_selectors:
                         try:
-                            day_button = driver.find_element(selector_type, selector_value)
-                            logging.info(f"✓ Found day field")
+                            day_element = wait_short.until(
+                                EC.presence_of_element_located((selector_type, selector_value))
+                            )
+                            logging.info(f"✓ Found day field with: {selector_type} = {selector_value}")
                             break
                         except:
                             continue
 
-                    if day_button:
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", day_button)
+                    if not day_element:
+                        raise Exception("Could not find Day field")
+
+                    tag_name = day_element.tag_name.lower()
+                    day_selected = False
+
+                    if tag_name == 'select':
+                        select = Select(day_element)
+                        try:
+                            select.select_by_value(str(birth_day))
+                            day_selected = True
+                            logging.info(f"✓ Selected day {birth_day} via Select")
+                        except:
+                            try:
+                                select.select_by_visible_text(str(birth_day))
+                                day_selected = True
+                                logging.info(f"✓ Selected day {birth_day} via visible text")
+                            except Exception as e:
+                                logging.error(f"Error selecting day via Select: {e}")
+                    else:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", day_element)
                         time.sleep(0.2)
-                        driver.execute_script("arguments[0].click();", day_button)
+                        driver.execute_script("arguments[0].click();", day_element)
                         time.sleep(0.5)
 
-                        # Select day option
+                        day_value = str(birth_day)
                         day_option_selectors = [
-                            (By.XPATH, f"//div[contains(@class, 'fui-Option') and text()='{birth_day}']"),
-                            (By.XPATH, f"//button[text()='{birth_day}']"),
-                            (By.XPATH, f"//*[contains(@role, 'option') and text()='{birth_day}']"),
+                            (By.XPATH, f"//*[@role='option'][@aria-label='{day_value}']"),
+                            (By.XPATH, f"//*[@role='option'][text()='{day_value}']"),
+                            (By.XPATH, f"//option[@value='{day_value}']"),
+                            (By.XPATH, f"//li[text()='{day_value}']"),
+                            (By.XPATH, f"//div[text()='{day_value}']"),
+                            (By.XPATH, f"//*[text()='{day_value}']"),
                         ]
 
-                        for sel_type, sel_value in day_option_selectors:
+                        for opt_type, opt_value in day_option_selectors:
                             try:
                                 day_option = WebDriverWait(driver, 3).until(
-                                    EC.element_to_be_clickable((sel_type, sel_value))
+                                    EC.element_to_be_clickable((opt_type, opt_value))
                                 )
                                 day_option.click()
-                                logging.info(f"✓ Selected day: {birth_day}")
+                                day_selected = True
+                                logging.info(f"✓ Selected day {day_value}")
                                 break
                             except:
                                 continue
 
-                        time.sleep(0.3)
-                    else:
-                        raise Exception("Could not find Day field")
+                        if not day_selected:
+                            clicked = driver.execute_script("""
+                                const options = Array.from(document.querySelectorAll('[role="option"], option, li, div'));
+                                const dayOption = options.find(opt => {
+                                    const text = opt.textContent?.trim();
+                                    const ariaLabel = opt.getAttribute('aria-label');
+                                    return text === arguments[0] || ariaLabel === arguments[0];
+                                });
+                                if (dayOption) {
+                                    dayOption.click();
+                                    return true;
+                                }
+                                return false;
+                            """, day_value)
+                            if clicked:
+                                day_selected = True
+                                logging.info(f"✓ Selected day {day_value} via JavaScript")
 
-                    # Year input (standard input field)
-                    year_input = None
-                    year_selectors = [
-                        (By.NAME, "BirthYear"),
-                        (By.CSS_SELECTOR, "input[aria-label*='Year' i]"),
-                        (By.CSS_SELECTOR, "input[name='BirthYear']"),
-                        (By.CSS_SELECTOR, "input[type='number']"),
+                    if not day_selected:
+                        raise Exception(f"Could not select day {birth_day}")
+
+                    time.sleep(0.3)
+
+                    # MONTH - Improved selectors with Portuguese month names
+                    month_selectors = [
+                        (By.ID, "BirthMonthDropdown"),
+                        (By.CSS_SELECTOR, "select[id='BirthMonthDropdown']"),
+                        (By.CSS_SELECTOR, "combobox[id='BirthMonthDropdown']"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Mês' i]"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Month' i]"),
+                        (By.NAME, "BirthMonth"),
+                        (By.CSS_SELECTOR, "select[name='BirthMonth']"),
+                        (By.CSS_SELECTOR, "select[id='BirthMonth']"),
+                        (By.CSS_SELECTOR, "button[aria-label*='Mês' i]"),
+                        (By.CSS_SELECTOR, "div[aria-label*='Mês' i]"),
+                        (By.CSS_SELECTOR, "button[aria-label*='Month' i]"),
                     ]
 
-                    for selector_type, selector_value in year_selectors:
+                    month_names_pt = ['', 'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+                                      'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro']
+                    month_names_en = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                                     'July', 'August', 'September', 'October', 'November', 'December']
+                    
+                    month_name_pt = month_names_pt[birth_month]
+                    month_name_en = month_names_en[birth_month]
+                    month_num = str(birth_month)
+
+                    month_element = None
+                    for selector_type, selector_value in month_selectors:
                         try:
-                            year_input = driver.find_element(selector_type, selector_value)
-                            logging.info(f"✓ Found year input")
+                            month_element = wait_short.until(
+                                EC.presence_of_element_located((selector_type, selector_value))
+                            )
+                            logging.info(f"✓ Found month field with: {selector_type} = {selector_value}")
                             break
                         except:
                             continue
 
-                    if year_input:
-                        year_input.clear()
-                        year_input.send_keys(str(birth_year))
-                        logging.info(f"✓ Entered year: {birth_year}")
+                    if not month_element:
+                        raise Exception("Could not find Month field")
+
+                    tag_name = month_element.tag_name.lower()
+                    month_selected = False
+
+                    if tag_name == 'select':
+                        select = Select(month_element)
+                        try:
+                            select.select_by_value(month_num)
+                            month_selected = True
+                            logging.info(f"✓ Selected month {month_num} via Select")
+                        except:
+                            try:
+                                select.select_by_visible_text(month_name_pt)
+                                month_selected = True
+                                logging.info(f"✓ Selected month {month_name_pt} via Select")
+                            except:
+                                try:
+                                    select.select_by_visible_text(month_name_en)
+                                    month_selected = True
+                                    logging.info(f"✓ Selected month {month_name_en} via Select")
+                                except Exception as e:
+                                    logging.error(f"Error selecting month via Select: {e}")
                     else:
-                        raise Exception("Could not find Year input field")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", month_element)
+                        time.sleep(0.2)
+                        driver.execute_script("arguments[0].click();", month_element)
+                        time.sleep(0.5)
+
+                        month_option_selectors = [
+                            (By.XPATH, f"//*[@role='option'][contains(text(), '{month_name_pt}')]"),
+                            (By.XPATH, f"//*[@role='option'][contains(text(), '{month_name_en}')]"),
+                            (By.XPATH, f"//*[@role='option'][text()='{month_num}']"),
+                            (By.XPATH, f"//*[contains(text(), '{month_name_pt}')]"),
+                            (By.XPATH, f"//*[contains(text(), '{month_name_en}')]"),
+                            (By.XPATH, f"//li[contains(text(), '{month_name_pt}')]"),
+                            (By.XPATH, f"//div[contains(text(), '{month_name_pt}')]"),
+                        ]
+
+                        for opt_type, opt_value in month_option_selectors:
+                            try:
+                                month_option = WebDriverWait(driver, 3).until(
+                                    EC.element_to_be_clickable((opt_type, opt_value))
+                                )
+                                month_option.click()
+                                month_selected = True
+                                logging.info(f"✓ Selected month {month_name_pt}")
+                                break
+                            except:
+                                continue
+
+                        if not month_selected:
+                            clicked = driver.execute_script("""
+                                const options = Array.from(document.querySelectorAll('[role="option"], option, li, div'));
+                                const monthOption = options.find(opt => {
+                                    const text = opt.textContent?.toLowerCase().trim();
+                                    return text.includes(arguments[0].toLowerCase()) || text === arguments[1];
+                                });
+                                if (monthOption) {
+                                    monthOption.click();
+                                    return true;
+                                }
+                                return false;
+                            """, month_name_pt, month_num)
+                            if clicked:
+                                month_selected = True
+                                logging.info(f"✓ Selected month via JavaScript")
+
+                    if not month_selected:
+                        raise Exception(f"Could not select month {birth_month}")
+
+                    time.sleep(0.3)
+
+                    # YEAR - Improved selectors
+                    year_selectors = [
+                        (By.NAME, "BirthYear"),
+                        (By.ID, "BirthYear"),
+                        (By.CSS_SELECTOR, "input[type='number'][aria-label*='Ano' i]"),
+                        (By.CSS_SELECTOR, "input[type='number'][aria-label*='Year' i]"),
+                        (By.CSS_SELECTOR, "select[name='BirthYear']"),
+                        (By.CSS_SELECTOR, "select[id='BirthYear']"),
+                        (By.CSS_SELECTOR, "[role='combobox'][aria-label*='Ano' i]"),
+                        (By.CSS_SELECTOR, "input[aria-label*='Ano' i]"),
+                        (By.CSS_SELECTOR, "input[aria-label*='Year' i]"),
+                    ]
+
+                    year_element = None
+                    for selector_type, selector_value in year_selectors:
+                        try:
+                            year_element = wait_short.until(
+                                EC.presence_of_element_located((selector_type, selector_value))
+                            )
+                            logging.info(f"✓ Found year field with: {selector_type} = {selector_value}")
+                            break
+                        except:
+                            continue
+
+                    if not year_element:
+                        raise Exception("Could not find Year field")
+
+                    tag_name = year_element.tag_name.lower()
+                    year_filled = False
+
+                    if tag_name == 'select':
+                        select = Select(year_element)
+                        select.select_by_value(str(birth_year))
+                        year_filled = True
+                        logging.info(f"✓ Selected year {birth_year} via Select")
+                    else:
+                        year_element.clear()
+                        year_element.send_keys(str(birth_year))
+                        year_filled = True
+                        logging.info(f"✓ Entered year {birth_year}")
+
+                    if not year_filled:
+                        raise Exception(f"Could not fill year {birth_year}")
 
                     dob_entered = True
-                    logging.info(f"✓ Successfully entered DOB: {birth_month}/{birth_day}/{birth_year}")
+                    logging.info(f"✓ Successfully entered DOB: {birth_day}/{birth_month}/{birth_year}")
 
                 except Exception as e:
                     logging.error(f"Error entering DOB: {e}")
@@ -1327,42 +1475,16 @@ class OutlookAccountCreator:
 
                 time.sleep(1)  # Give page time to be ready for Next button
 
-                # Click Next button after DOB - try multiple approaches
-                next_clicked = False
-                next_selectors = [
-                    (By.ID, "iSignupAction"),
-                    (By.CSS_SELECTOR, "input[type='submit']"),
-                    (By.CSS_SELECTOR, "button[type='submit']"),
-                    (By.XPATH, "//input[@type='submit']"),
-                    (By.XPATH, "//button[@type='submit']"),
-                    (By.XPATH, "//input[@id='iSignupAction']"),
-                ]
-
-                for selector_type, selector_value in next_selectors:
-                    try:
-                        next_button = wait_short.until(
-                            EC.element_to_be_clickable((selector_type, selector_value))
-                        )
-                        # Scroll to button and use JavaScript click for reliability
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
-                        time.sleep(0.3)
-                        driver.execute_script("arguments[0].click();", next_button)
-                        logging.info(f"✓ Clicked Next after DOB using: {selector_type}")
-                        next_clicked = True
-                        time.sleep(2)  # Wait for page to navigate
-                        break
-                    except Exception as e:
-                        logging.debug(f"Failed with selector {selector_type}: {e}")
-                        continue
-
-                if not next_clicked:
+                # Click Next button after DOB using helper method (supports Portuguese and English)
+                if not self._click_next_button(driver, wait_time=5, context="after DOB"):
                     logging.warning("Could not auto-click Next button after DOB")
                     logging.warning("Please manually click Next button...")
                     self._take_screenshot(driver, "keepopen_manual_next_needed")
-                    
                     # Wait up to 30 seconds for manual click
                     logging.info("Waiting 30 seconds for manual Next click...")
                     time.sleep(30)
+                else:
+                    time.sleep(2)  # Wait for page to navigate
 
             except Exception as e:
                 logging.error(f"Failed at step 3 (DOB): {e}")
@@ -1460,39 +1582,14 @@ class OutlookAccountCreator:
 
                     time.sleep(1)  # Give page time to process
 
-                    # Click Next button after name entry
-                    next_clicked = False
-                    next_selectors = [
-                        (By.ID, "iSignupAction"),
-                        (By.CSS_SELECTOR, "input[type='submit']"),
-                        (By.CSS_SELECTOR, "button[type='submit']"),
-                        (By.XPATH, "//input[@type='submit']"),
-                        (By.XPATH, "//button[@type='submit']"),
-                        (By.XPATH, "//button[contains(text(), 'Next')]"),
-                    ]
-
-                    for selector_type, selector_value in next_selectors:
-                        try:
-                            next_button = WebDriverWait(driver, 5).until(
-                                EC.element_to_be_clickable((selector_type, selector_value))
-                            )
-                            # Use JavaScript click
-                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
-                            time.sleep(0.3)
-                            driver.execute_script("arguments[0].click();", next_button)
-                            logging.info(f"✓ Clicked Next after name using: {selector_type}")
-                            next_clicked = True
-                            time.sleep(2)  # Wait for navigation
-                            break
-                        except Exception as e:
-                            logging.debug(f"Next button selector {selector_type} failed: {e}")
-                            continue
-
-                    if not next_clicked:
+                    # Click Next button after name entry using helper method (supports Portuguese and English)
+                    if not self._click_next_button(driver, wait_time=5, context="after name"):
                         logging.warning("Could not auto-click Next after name entry")
                         logging.warning("Please manually click Next button...")
                         self._take_screenshot(driver, "keepopen_manual_next_after_name")
                         time.sleep(30)  # Wait for manual click
+                    else:
+                        time.sleep(2)  # Wait for navigation
 
             except Exception as e:
                 logging.warning(f"Issue at step 4 (name): {e}")
@@ -1713,6 +1810,80 @@ class OutlookAccountCreator:
 
         # NOTE: No finally block that closes driver!
         # Caller is responsible for closing the driver when done
+
+    def _click_next_button(self, driver, wait_time: int = 5, context: str = ""):
+        """
+        Helper method to click Next/Avançar button supporting both Portuguese and English
+        
+        Args:
+            driver: Selenium WebDriver instance
+            wait_time: Maximum time to wait for button to be clickable
+            context: Context description for logging (e.g., "after password")
+        
+        Returns:
+            True if button was clicked successfully, False otherwise
+        """
+        next_button = None
+        wait = WebDriverWait(driver, wait_time)
+        
+        # Try multiple selectors including both English and Portuguese
+        next_selectors = [
+            (By.ID, "iSignupAction"),
+            (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.CSS_SELECTOR, "input[type='submit']"),
+            (By.XPATH, "//button[contains(text(), 'Next')]"),  # English
+            (By.XPATH, "//button[contains(text(), 'Avançar')]"),  # Portuguese
+            (By.XPATH, "//button[contains(@class, 'fui-Button') and contains(text(), 'Avançar')]"),  # Portuguese with class
+            (By.XPATH, "//button[contains(@class, 'fui-Button') and contains(text(), 'Next')]"),  # English with class
+            (By.CSS_SELECTOR, "button.fui-Button"),  # Any button with fui-Button class
+            (By.XPATH, "//input[@type='submit']"),
+            (By.XPATH, "//input[@value='Next']"),
+            (By.XPATH, "//input[@value='Avançar']"),
+        ]
+        
+        for selector_type, selector_value in next_selectors:
+            try:
+                next_button = wait.until(
+                    EC.element_to_be_clickable((selector_type, selector_value))
+                )
+                # Scroll into view
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+                time.sleep(0.2)
+                
+                # Try normal click first
+                try:
+                    next_button.click()
+                    logging.info(f"✓ Clicked Next button{(' ' + context) if context else ''} using: {selector_type} = {selector_value}")
+                    return True
+                except:
+                    # Fallback to JavaScript click
+                    driver.execute_script("arguments[0].click();", next_button)
+                    logging.info(f"✓ Clicked Next button{(' ' + context) if context else ''} (JS click) using: {selector_type} = {selector_value}")
+                    return True
+            except Exception as e:
+                logging.debug(f"Selector {selector_type} = {selector_value} failed: {e}")
+                continue
+        
+        # Fallback: Search all buttons for text
+        if not next_button:
+            try:
+                all_buttons = driver.find_elements(By.TAG_NAME, "button")
+                for btn in all_buttons:
+                    try:
+                        btn_text = btn.text.strip()
+                        if btn_text in ["Next", "Avançar"] or "Avançar" in btn_text or "Next" in btn_text:
+                            if btn.is_displayed() and btn.is_enabled():
+                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                time.sleep(0.2)
+                                driver.execute_script("arguments[0].click();", btn)
+                                logging.info(f"✓ Clicked Next button{(' ' + context) if context else ''} using fallback (text: {btn_text})")
+                                return True
+                    except:
+                        continue
+            except Exception as e:
+                logging.debug(f"Fallback button search failed: {e}")
+        
+        return False
 
     def _take_screenshot(self, driver, name: str):
         """Take screenshot for debugging"""

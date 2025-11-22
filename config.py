@@ -8,6 +8,11 @@ OUTLOOK_IMAP_PORT = 993
 # Email domain
 EMAIL_DOMAIN = "outlook.com"
 
+# Faker language/locale settings
+# Options: 'en_US' (English), 'pt_BR' (Portuguese Brazil), 'es_ES' (Spanish), etc.
+# See https://faker.readthedocs.io/en/master/locales.html for all available locales
+FAKER_LOCALE = "pt_BR"  # Default: Portuguese Brazil. Change to 'en_US' for English, 'es_ES' for Spanish, etc.
+
 # Password settings - FIXED PASSWORD FOR ALL ACCOUNTS
 FIXED_PASSWORD = "Outlook234!"  # Default password for all accounts (change as needed)
 
