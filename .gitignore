@@ -58,6 +58,13 @@ nul
 chromedriver.exe
 chromedriver
 
+# PyInstaller
+*.spec
+build/
+dist/
+setup_and_run.py
+outlook_creator.bat
+
 # OS specific
 Thumbs.db
 .DS_Store
